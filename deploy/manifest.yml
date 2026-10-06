@@ -1,0 +1,36 @@
+# cloud.gov deployment manifest for model-router-service.
+#
+# Uses the Python buildpack (no Dockerfile needed on cloud.gov). The app binds
+# $PORT automatically (see src/model_router_service/__main__.py).
+#
+# SECRETS: do NOT put ROUTER_UPSTREAM_API_KEY (or any key) here. Bind them from
+# a cloud.gov user-provided service (CUPS) or set them with
+# `cf set-env` / credentials, so they never live in the manifest or git. The
+# non-secret config below is safe to version.
+#
+# Example secret wiring (run once, out of band):
+#   cf cups model-router-secrets -p '{"ROUTER_UPSTREAM_API_KEY":"...","ROUTER_JUDGE_API_KEY":"..."}'
+#   # then bind it:  services: [model-router-secrets]  (uncomment below)
+---
+applications:
+  - name: model-router-service
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    command: python -m model_router_service
+    # health check hits /healthz (liveness, no upstream call).
+    health-check-type: http
+    health-check-http-endpoint: /healthz
+    env:
+      # Non-secret config only. Keys come from a bound service (see header).
+      ROUTER_UPSTREAM_BASE_URL: https://api.gsa.usai.gov/api/v1
+      ROUTER_JUDGE_MODEL: claude_4_5_haiku
+      ROUTER_DEFAULT_MODEL: claude_4_5_sonnet
+      ROUTER_JUDGE_ENABLED: "true"
+      ROUTER_JUDGE_TIMEOUT_S: "4"
+      ROUTER_LOG_LEVEL: INFO
+    # Bind the secrets service that supplies ROUTER_UPSTREAM_API_KEY etc.:
+    # services:
+    #   - model-router-secrets

@@ -1,0 +1,14 @@
+# docker-compose for LOCAL development.
+# Reads your local .env (copy from .env.example and fill in a real key).
+# Exposes the proxy on localhost:8080.
+services:
+  model-router:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Force a container-public bind + fixed port for local use.
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

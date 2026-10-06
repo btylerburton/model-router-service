@@ -1,0 +1,8 @@
+# Pinned runtime dependencies for the cloud.gov Python buildpack.
+# Mirrors pyproject.toml [project].dependencies. The buildpack installs from
+# this file. Keep the two in sync (CI could assert this).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1

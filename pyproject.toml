@@ -1,0 +1,39 @@
+[project]
+name = "model-router-service"
+version = "0.1.0"
+description = "OpenAI-compatible routing proxy that auto-selects the best upstream model per request (LLM judge + deterministic scorer), in front of a USAi-style gateway."
+requires-python = ">=3.11"
+license = { text = "CC0-1.0" }
+# Pinned exact versions (no floating ranges) per federal supply-chain guidance.
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "httpx==0.28.1",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+    "ruff==0.8.6",
+]
+
+[project.scripts]
+model-router-service = "model_router_service.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
