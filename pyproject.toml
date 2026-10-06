@@ -4,13 +4,21 @@ version = "0.1.0"
 description = "OpenAI-compatible routing proxy that auto-selects the best upstream model per request (LLM judge + deterministic scorer), in front of a USAi-style gateway."
 requires-python = ">=3.11"
 license = { text = "CC0-1.0" }
-# Pinned exact versions (no floating ranges) per federal supply-chain guidance.
+# Dependencies use bounded COMPATIBLE RANGES, not single exact pins. Rationale:
+# this service must install on whatever Python the host/sandbox ships (observed:
+# CPython 3.14 on aarch64). An exact pin like pydantic==2.10.4 has no prebuilt
+# wheel for every Python/arch, forcing a from-source Rust build (pydantic-core)
+# that fails on images without a C/Rust toolchain. Ranges let the installer pick
+# a version that HAS a wheel for the running interpreter while staying bounded
+# (upper bound guards against a breaking major). Installs should pass
+# --only-binary=:all: so a missing wheel fails fast instead of building from
+# source. For a hard-locked build, generate a per-target lockfile (uv.lock) in CI.
 dependencies = [
-    "fastapi==0.115.6",
-    "uvicorn[standard]==0.34.0",
-    "httpx==0.28.1",
-    "pydantic==2.10.4",
-    "pydantic-settings==2.7.1",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "httpx>=0.28,<1",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.7,<3",
 ]
 
 [project.optional-dependencies]

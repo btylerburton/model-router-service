@@ -1,8 +1,14 @@
-# Pinned runtime dependencies for the cloud.gov Python buildpack.
-# Mirrors pyproject.toml [project].dependencies. The buildpack installs from
-# this file. Keep the two in sync (CI could assert this).
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-httpx==0.28.1
-pydantic==2.10.4
-pydantic-settings==2.7.1
+# Runtime dependencies. Mirrors pyproject.toml [project].dependencies.
+#
+# BOUNDED COMPATIBLE RANGES, not single exact pins — so the service installs on
+# whatever Python the host/sandbox/cloud.gov buildpack ships (observed: CPython
+# 3.14 aarch64). An exact pin without a matching prebuilt wheel forces a
+# from-source Rust build of pydantic-core, which fails on images with no C/Rust
+# toolchain. Install with --only-binary=:all: so a missing wheel fails fast
+# rather than building from source. For a hard-locked build, generate a
+# per-target lockfile (uv.lock) in CI.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+httpx>=0.28,<1
+pydantic>=2.11,<3
+pydantic-settings>=2.7,<3
