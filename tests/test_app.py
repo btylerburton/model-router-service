@@ -116,17 +116,22 @@ def test_bypass_header_honors_pin():
 def test_fail_open_to_default_when_judge_returns_garbage():
     record = {}
     settings = _settings(default_model="claude_4_5_sonnet")
-    # judge_pick is a hallucinated id → judge raises → scorer fallback (which,
-    # for a reasoning task, still yields a covering model). Use a prompt the
-    # scorer can also handle so we assert a sane forward happened.
+    # judge_pick is a hallucinated id → judge.decide raises → router falls open
+    # to the deterministic scorer, which forwards a REAL catalog id (never the
+    # hallucinated one, and never an error to the client).
     transport = _mock_transport(judge_pick="not-a-real-model", record=record)
     with _client(settings, transport) as c:
         r = c.post("/v1/chat/completions", json={
-            "model": "x", "messages": [{"role": "user", "content": "redesign the architecture"}],
+            "model": "x",
+            "messages": [{"role": "user", "content": "prove this algorithm correct with formal verification"}],
         })
     assert r.status_code == 200
-    # Scorer picked a real covering model (not the hallucinated judge id).
-    assert record["forwarded_model"] in {"claude_4_5_sonnet", "gemini-2.5-pro"}
+    # A real catalog id was forwarded (the scorer's floored pick), not the
+    # hallucinated judge id and not an error.
+    assert record["forwarded_model"] in {
+        "claude_4_5_haiku", "claude_4_5_sonnet", "gemini-2.5-pro"
+    }
+    assert record["forwarded_model"] != "not-a-real-model"
 
 
 def test_streaming_is_proxied():

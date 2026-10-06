@@ -33,6 +33,15 @@ class JudgeDecision:
     model: str
     why: str
     via: str = "judge"
+    # Optional reasoning sub-scores the judge may return in the same call. When
+    # present, the router uses these (via scorer.grade_from_subscores) as the
+    # authoritative grade instead of the offline heuristic. None → use heuristic.
+    depth: float | None = None
+    breadth: float | None = None
+    novelty: float | None = None
+
+    def has_subscores(self) -> bool:
+        return None not in (self.depth, self.breadth, self.novelty)
 
 
 class _LRU:
@@ -63,8 +72,14 @@ _JUDGE_SYSTEM = (
     "choose the SINGLE cheapest candidate that can do the task well. Prefer cheaper, "
     "faster models for simple/mechanical work; reserve expensive high-reasoning "
     "models for genuinely hard tasks (architecture, cross-file refactors, hard "
-    "debugging) or large context. Reply with STRICT JSON only: "
-    '{"model":"<exact id from the list>","why":"<one short sentence>"}. '
+    "debugging, proofs/formal verification) or large context. "
+    "Also grade the task's reasoning difficulty on three axes, each 0.0-1.0:\n"
+    "  depth   = multi-step derivation / proof / formal reasoning\n"
+    "  breadth = cross-file / cross-module / whole-system scope\n"
+    "  novelty = design-from-scratch vs. apply-a-known-pattern\n"
+    "Reply with STRICT JSON only: "
+    '{"model":"<exact id from the list>","why":"<one short sentence>",'
+    '"depth":<0..1>,"breadth":<0..1>,"novelty":<0..1>}. '
     "The model MUST be one of the provided ids."
 )
 
@@ -173,4 +188,18 @@ def _parse_decision(content: str, valid_ids: set[str]) -> JudgeDecision:
     model = str(obj["model"]).strip()
     if model not in valid_ids:
         raise ValueError(f"judge returned non-candidate model id: {model!r}")
-    return JudgeDecision(model=model, why=str(obj.get("why", ""))[:200], via="judge")
+
+    def _sub(key: str) -> float | None:
+        v = obj.get(key)
+        if isinstance(v, (int, float)):
+            return max(0.0, min(1.0, float(v)))
+        return None
+
+    return JudgeDecision(
+        model=model,
+        why=str(obj.get("why", ""))[:200],
+        via="judge",
+        depth=_sub("depth"),
+        breadth=_sub("breadth"),
+        novelty=_sub("novelty"),
+    )

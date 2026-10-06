@@ -1,28 +1,40 @@
 """router — decide which upstream model a request should be forwarded to.
 
-Combines the deterministic scorer (pre-filter + fallback) with the LLM judge
-(final ranker), honoring explicit pins and ALWAYS failing open:
+Graded flow (see scorer.py for the "why boolean reasoning was unreachable" note):
 
-  1. Pin/bypass → caller handles upstream of this (see app.py); router is only
-     invoked when routing is wanted.
-  2. Scorer shortlists candidates covering the request's HARD demands.
-  3. If the judge is enabled, it ranks the shortlist. On ANY judge failure
-     (timeout, bad output, network), fall back to the scorer's pick.
-  4. If even the scorer yields nothing, fall back to settings.default_model.
+  1. The scorer grades the request's reasoning (r, band, rank FLOOR) and builds a
+     candidate set that (a) covers the HARD capability demands (vision/long
+     context) and (b) sits AT OR ABOVE the band floor. The floor is what lets the
+     hardest work climb to the top tier.
+  2. If the judge is enabled, it ranks WITHIN that floored set and may ALSO
+     return its own depth/breadth/novelty sub-scores. When it does, we re-grade
+     with the judge's sub-scores (authoritative) — which can RAISE the floor — and
+     re-floor the candidate set, then take the judge's pick if it still qualifies,
+     else the cheapest at/above the (possibly raised) floor.
+  3. On ANY judge failure (timeout, bad output, network) fall open to the
+     scorer's deterministic floored pick.
+  4. If even the scorer abstains / yields nothing, fall back to default_model.
 
-Every path returns a Decision with a human-readable rationale, surfaced in the
-audit response header and logs.
+Every path returns a Decision with a rationale + the graded reasoning dict, both
+surfaced in the audit header and the per-turn decision log.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 import httpx
 
 from .judge import Judge
-from .scorer import ModelProfile, score, shortlist
+from .scorer import (
+    ModelProfile,
+    ReasoningScore,
+    grade_from_subscores,
+    score,
+    shortlist,
+)
 
 log = logging.getLogger("model_router_service.router")
 
@@ -32,6 +44,8 @@ class Decision:
     model: str
     reason: str
     via: str  # "judge" | "scorer" | "default"
+    reasoning: Optional[dict] = None       # ReasoningScore.to_dict()
+    demands: list[str] = field(default_factory=list)
 
 
 class Router:
@@ -50,24 +64,65 @@ class Router:
     def profiles(self) -> list[ModelProfile]:
         return self._profiles
 
-    async def decide(self, request_text: str, *, client: httpx.AsyncClient) -> Decision:
-        # Scorer first: shortlist + a deterministic fallback pick.
-        scored = score(request_text, self._profiles)
-        _, candidates = shortlist(request_text, self._profiles)
+    def _cheapest_at_or_above(self, candidates: list[ModelProfile]) -> Optional[ModelProfile]:
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda p: (p.cost_rank, p.input_cost if p.input_cost is not None else float("inf"), p.id),
+        )[0]
 
+    async def decide(self, request_text: str, *, client: httpx.AsyncClient) -> Decision:
+        # 1. Heuristic grade + floored candidate set + deterministic fallback pick.
+        scored = score(request_text, self._profiles)
+        demands, rs, candidates = shortlist(request_text, self._profiles)
+
+        # 2. Judge ranks within the floored set and may re-grade reasoning.
         if self._judge is not None and candidates:
             try:
                 jd = await self._judge.decide(request_text, candidates, client=client)
-                return Decision(model=jd.model, reason=jd.why or "selected by judge", via="judge")
+
+                # If the judge returned sub-scores, they are authoritative — they
+                # may RAISE the band/floor, so re-floor the candidate set.
+                if jd.has_subscores():
+                    rs = grade_from_subscores(jd.depth, jd.breadth, jd.novelty)
+                    _, _, candidates = shortlist(
+                        request_text, self._profiles, reasoning=rs
+                    )
+
+                valid = {p.id for p in candidates}
+                if jd.model in valid:
+                    chosen = jd.model
+                    reason = jd.why or "selected by judge"
+                else:
+                    # Judge picked below the (possibly raised) floor — enforce it.
+                    floored = self._cheapest_at_or_above(candidates)
+                    if floored is None:
+                        raise RuntimeError("no candidate at/above floor after judge re-grade")
+                    chosen = floored.id
+                    reason = (
+                        f"judge chose {jd.model} below floor {rs.floor}; "
+                        f"enforced cheapest at/above floor"
+                    )
+                return Decision(
+                    model=chosen, reason=reason, via="judge",
+                    reasoning=rs.to_dict(), demands=sorted(demands),
+                )
             except Exception as exc:  # FAIL OPEN to the scorer
                 log.warning("judge failed, falling back to scorer: %s", exc)
 
+        # 3. Scorer fallback.
         if scored.suggested:
-            return Decision(model=scored.suggested, reason=scored.reason, via="scorer")
+            return Decision(
+                model=scored.suggested, reason=scored.reason, via="scorer",
+                reasoning=scored.reasoning, demands=scored.demands,
+            )
 
-        # Last resort: configured default (fail-open landing model).
+        # 4. Last resort: configured default (fail-open landing model).
         return Decision(
             model=self._default,
-            reason="no candidate from judge or scorer; using default_model",
+            reason="scorer abstained and no judge pick; using default_model",
             via="default",
+            reasoning=scored.reasoning,
+            demands=scored.demands,
         )

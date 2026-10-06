@@ -103,6 +103,27 @@ class Settings(BaseSettings):
     # not bounded by this once headers are received.
     upstream_timeout_s: float = Field(default=600.0)
 
+    # --- TLS trust (for TLS-inspecting proxies like Zscaler) ----------------
+    # On a host behind a TLS-intercepting corporate proxy (e.g. Zscaler), the
+    # upstream presents a proxy-RE-SIGNED certificate. httpx verifies against
+    # certifi's bundle by default, which does NOT contain the corporate root, so
+    # the handshake fails — and such a failure often surfaces as a gateway 401 /
+    # block page rather than a clean TLS error. Point this at a CA bundle that
+    # INCLUDES the proxy root to fix it. This is the service-side equivalent of
+    # acq's persistent `zscaler-ca-certificate` kit.
+    #
+    #   ROUTER_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt   (host system store,
+    #     which on a managed host already includes the Zscaler root)
+    #   ROUTER_CA_BUNDLE=/path/to/zscaler-root.pem            (just the proxy root)
+    #
+    # Leave unset to use certifi's default (correct for cloud.gov / any
+    # non-intercepted egress). NEVER disable verification — there is deliberately
+    # no "verify=false" option here.
+    ca_bundle: str | None = Field(
+        default=None,
+        description="Path to a CA bundle that includes any TLS-inspecting proxy root (e.g. Zscaler). Unset = certifi default.",
+    )
+
     # Server bind. cloud.gov provides $PORT; __main__ maps it to ROUTER_PORT.
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8080)
@@ -110,6 +131,11 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
 
     # --- Derived helpers ----------------------------------------------------
+    @property
+    def verify(self):
+        """httpx `verify` value: a CA-bundle path when configured, else True
+        (certifi default). Never False — verification is not disableable."""
+        return self.ca_bundle if self.ca_bundle else True
     @property
     def effective_judge_base_url(self) -> str:
         return str(self.judge_base_url or self.upstream_base_url)

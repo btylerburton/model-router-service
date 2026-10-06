@@ -22,6 +22,8 @@ dev = [
 
 [project.scripts]
 model-router-service = "model_router_service.__main__:main"
+model-router = "model_router_service.cli:main"
+model-router-toggle = "model_router_service.toggle:main"
 
 [build-system]
 requires = ["setuptools>=68"]

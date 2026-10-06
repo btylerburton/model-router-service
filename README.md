@@ -16,23 +16,65 @@ OpenCode.
 
 Two-stage, mirroring hermes/jev's two-call shape — but the engine is yours:
 
-1. **Deterministic scorer** (offline, zero-dependency) reduces the request to the
-   capabilities it demands and shortlists candidate models that cover the HARD
-   demands (vision, long context).
+1. **Graded deterministic scorer** (offline, zero-dependency). The request is
+   scored on a continuous **reasoning difficulty** `r ∈ [0,1]` from three signals
+   — **depth** (proofs/derivation), **breadth** (cross-file/system scope), and
+   **novelty** (design-from-scratch) — combined as `max(weighted_mean,
+   strongest_signal)`. `r` maps to a **band** (`none`/`light`/`moderate`/`hard`/
+   `extreme`) with a **minimum cost-rank floor**. Capability demands
+   (vision/long-context) still gate the candidate set.
 2. **LLM judge** — one small call to a cheap model (configurable; defaults to the
-   same gateway + a cheap model id) ranks the shortlist and picks the cheapest
-   capable model. The judge is constrained to the provided ids and its JSON reply
-   is validated.
+   same gateway + a cheap model id) ranks the floored shortlist AND may return
+   its own depth/breadth/novelty sub-scores (same call, no extra latency). When
+   it does, those are authoritative and can raise the floor. The judge is
+   constrained to the provided ids and its JSON reply is validated.
+
+**Why graded, not boolean:** a boolean `reasoning` demand made the top tier
+*unreachable* — on the USAi catalog every rank-4/5 model (Opus/GPT-5) has the
+same capability set as a rank-3 Sonnet, so "cheapest covering reasoning" always
+stopped at Sonnet. The per-band rank **floor** lets the hardest work (a
+correctness proof, a Paxos formal verification) climb to Opus-tier, while keeping
+cost-down behavior *within* a band. Weights and band edges are named constants
+(and overridable at runtime — see Steering below), so re-tuning is "change a
+number, replay the cache, diff the decisions."
 
 **Fail-open everywhere:** if the judge times out, errors, or returns a bad id,
-the service falls back to the scorer's pick; if even that yields nothing, it
-forwards to a configured `default_model`. A routing problem never breaks a turn.
+the service falls back to the graded scorer's floored pick; if even that abstains,
+it forwards to a configured `default_model`. A routing problem never breaks a turn.
 
 **Honors pins:** send the bypass header (`x-model-router-bypass: 1`) with an
 explicit `model` and the request is forwarded untouched.
 
-**Auditable:** the chosen model + rationale is returned in the
-`x-model-router-decision` response header and logged on every request.
+**Auditable:** the chosen model, a decision id, and the rationale are returned in
+the `x-model-router-decision` response header, and one JSON line per routed turn
+(`prompt_hash, r, band, demands, winner`) is written to the decision log.
+
+## Steering the router after a bad route
+
+When the router picks a poor model, you don't edit code — you give feedback and
+recalibrate. A correction is just "this prompt should have used `<model>`"; the
+service **back-solves** the reasoning target from that model's cost tier, records
+it, and an offline **recalibrate** pass searches band edges that satisfy your
+corrections without regressing known-good decisions, writing a tuning-overrides
+file the scorer loads. Deterministic, diffable, reversible (delete the file).
+
+```bash
+# correct the LAST routed turn (reads the decision log), or name a prompt:
+model-router feedback --last --model claude_4_8_opus
+model-router feedback --prompt "refactor this module and add tests" --model gpt-5.2
+
+# search + apply new band edges (dry-run first to preview):
+model-router recalibrate --dry-run
+model-router recalibrate
+
+# or from a running proxy / the agent, correct a turn by its decision id
+# (from the x-model-router-decision header):
+curl -s $ROUTER/feedback -H 'content-type: application/json' \
+  -d '{"id":"<decision_id>","model":"claude_4_8_opus","note":"needed opus"}'
+```
+
+Corrections are **inert** until `recalibrate` runs — nothing changes routing
+mid-session. Point the scorer at the overrides with `MODEL_ROUTER_TUNING`.
 
 ## No hardcoded anything (12-factor)
 
@@ -52,6 +94,10 @@ an upstream gateway + key + judge model + default model). See `.env.example`.
 | `ROUTER_JUDGE_ENABLED` | — | `false` → scorer-only, no judge call |
 | `ROUTER_JUDGE_TIMEOUT_S` / `ROUTER_JUDGE_CACHE_SIZE` | — | Judge call tuning |
 | `ROUTER_BYPASS_HEADER` / `ROUTER_DECISION_HEADER` | — | Pin + audit header names |
+| `MODEL_ROUTER_TUNING` | — | Path to a band-edge/weight overrides file (written by `recalibrate`) |
+| `MODEL_ROUTER_FEEDBACK` | — | Path to the corrections store (JSONL) |
+| `MODEL_ROUTER_DECISION_LOG` | — | Path to the per-turn decision log (JSONL) |
+| `ROUTER_CA_BUNDLE` | — | CA bundle for a TLS-inspecting proxy (see TLS section) |
 
 ## Endpoints
 
@@ -59,6 +105,7 @@ an upstream gateway + key + judge model + default model). See `.env.example`.
 |--------|------|---------|
 | POST | `/v1/chat/completions` | The routed, streaming-capable proxy |
 | GET | `/v1/models` | Passthrough of the upstream model list |
+| POST | `/feedback` | Record a routing correction (by prompt or decision id) |
 | GET | `/healthz` | Liveness (no upstream call) |
 | GET | `/readyz` | Readiness (candidate profiles loaded) |
 
@@ -76,6 +123,106 @@ Or with Docker:
 cp .env.example .env
 docker compose up --build        # http://localhost:8080
 ```
+
+## TLS trust (`ROUTER_CA_BUNDLE`) — Zscaler and other inspecting proxies
+
+**Diagnose before you set anything.** The common instinct — "I'm on Zscaler, so
+point the service at the Zscaler cert" — is usually **wrong** and will *break* a
+connection that would otherwise work. Run the one-line check first.
+
+### Key fact: `ROUTER_CA_BUNDLE` REPLACES the trust store, it does not add to it
+
+Python/httpx verify TLS against the `certifi` bundle (~140 public roots) by
+default. Setting `ROUTER_CA_BUNDLE` makes httpx trust **only** the certs in that
+file. So pointing it at a single `zscaler-root.pem` means the service trusts
+Zscaler and *nothing else* — and any endpoint presenting a normal **public**
+chain (e.g. USAi behind Amazon/Starfield roots) then fails with
+`CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`.
+
+Only set `ROUTER_CA_BUNDLE` when the endpoint's chain is **actually** being
+re-signed by a proxy whose root certifi lacks — and even then, use a bundle that
+ALSO keeps the public roots (see "combined bundle" below).
+
+### Step 1 — does the default (certifi) already work?
+
+```bash
+openssl s_client -connect api.gsa.usai.gov:443 \
+  -CAfile "$(python3 -c 'import certifi; print(certifi.where())')" </dev/null 2>/dev/null \
+  | grep -i "verify return code"
+```
+
+- **`Verify return code: 0 (ok)`** → certifi verifies the chain. **Leave
+  `ROUTER_CA_BUNDLE` UNSET.** You're done — no cert wrangling needed. (This is
+  the normal case for `api.gsa.usai.gov`, whose chain is public
+  Amazon → Amazon Root CA 1 → Starfield, not Zscaler.)
+- **Non-zero** (e.g. `20 (unable to get local issuer certificate)`) → the chain
+  really is being re-signed by a proxy root certifi doesn't have. Go to Step 2.
+
+To see the actual chain and the root it terminates at:
+
+```bash
+openssl s_client -connect api.gsa.usai.gov:443 -showcerts </dev/null 2>/dev/null \
+  | grep -E "^\s*[0-9]+ s:|^\s*i:"
+# The LAST cert's `i:` (issuer) is the root you must trust. If it says
+# "CN=Zscaler Root CA" you are being intercepted; if it says Amazon/Starfield
+# you are NOT, and certifi already covers it.
+```
+
+### Step 2 — only if Step 1 was non-zero: build a COMBINED bundle
+
+Export the proxy root, then concatenate it **with** certifi so you keep the
+public roots too (split-tunnel safe — works whether or not a given host is
+intercepted). Verification stays ON; there is deliberately no "disable verify".
+
+```bash
+# macOS — export the Zscaler root (it's a public, self-signed root):
+security find-certificate -a -c "Zscaler" -p /Library/Keychains/System.keychain > ~/zscaler-root.pem
+# (The genuine shared root is self-signed with SHA-256
+#  04:F6:1F:1D:13:AA:E1:D1:...:8B:1A:53 — verify with:
+#   openssl x509 -in ~/zscaler-root.pem -noout -subject -issuer -fingerprint -sha256 )
+
+# Combine public roots (certifi) + the proxy root into ONE bundle:
+cat "$(python3 -c 'import certifi; print(certifi.where())')" ~/zscaler-root.pem > ~/combined-ca.pem
+grep -c "BEGIN CERTIFICATE" ~/combined-ca.pem        # expect 100+, NOT 1
+
+# Confirm it verifies the real chain:
+openssl s_client -connect api.gsa.usai.gov:443 \
+  -CAfile ~/combined-ca.pem </dev/null 2>/dev/null | grep -i "verify return code"
+# want: Verify return code: 0 (ok)
+```
+
+```bash
+# .env — point at the COMBINED bundle (never a lone cert):
+ROUTER_CA_BUNDLE=/Users/<you>/combined-ca.pem
+```
+
+On a managed **Linux** host the system store already merges public + proxy roots,
+so a single path works there: `ROUTER_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`.
+On **cloud.gov** / any non-intercepted egress, leave `ROUTER_CA_BUNDLE` unset.
+
+### Step 3 — restart and confirm
+
+```bash
+pkill -f model_router_service
+<run the service>                 # e.g. uv run python -m model_router_service
+curl -s http://127.0.0.1:8080/readyz    # expect {"status":"ready","candidates":15}
+```
+
+If `/readyz` reports `candidates > 0` and startup logged no TLS/401 warning,
+trust is correct.
+
+> **Note (dev):** a startup `401 Unauthorized` from `/models` is NOT always a
+> trust problem — it is also what you get from a stale server started before the
+> key was loaded, or from a genuinely bad `ROUTER_UPSTREAM_API_KEY`. Confirm the
+> key independently with:
+> ```bash
+> curl -s -o /dev/null -w "%{http_code}\n" https://api.gsa.usai.gov/api/v1/models \
+>   -H "Authorization: Bearer $(grep ^ROUTER_UPSTREAM_API_KEY= .env | cut -d= -f2-)"
+> ```
+> `200` = key good (so a service-side failure is TLS/trust or a stale process);
+> `401` = fix the key.
+
+## Run and point OpenCode at it
 
 Point OpenCode at it (the `usai` provider's `baseURL`):
 
