@@ -19,7 +19,9 @@ applications:
     instances: 1
     buildpacks:
       - python_buildpack
-    command: python -m model_router_service
+    # Start command comes from the top-level Procfile (`web:`), which sets
+    # PYTHONPATH=src — our package is src-layout and the buildpack does NOT
+    # pip-install it, so `python -m model_router_service` needs src on the path.
     # health check hits /healthz (liveness, no upstream call).
     health-check-type: http
     health-check-http-endpoint: /healthz

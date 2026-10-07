@@ -253,16 +253,62 @@ curl -s -D- http://localhost:8080/v1/chat/completions \
 
 ## Deploy to cloud.gov
 
+The service is a config-free app (12-factor): the Python buildpack runs it, it
+binds `$PORT` automatically, and **every** host/model/key is an env var. The
+`deploy/manifest.yml` holds only non-secret config; the upstream key comes from a
+bound user-provided service so it never lives in git or the manifest.
+
+**Prerequisites:** the `cf` CLI, authenticated to your cloud.gov org/space
+(`cf login --sso -a api.fr.cloud.gov`), and a real USAi gateway key.
+
 ```bash
-# 1. Supply secrets out-of-band (never in the manifest):
-cf cups model-router-secrets -p '{"ROUTER_UPSTREAM_API_KEY":"…"}'
-# 2. Uncomment the `services:` block in deploy/manifest.yml to bind it.
-# 3. Push:
+cd model-router-service
+
+# 1. Create the secrets service (ONE time; holds the upstream key out of band).
+#    Add ROUTER_JUDGE_API_KEY too ONLY if the judge uses a different endpoint.
+cf cups model-router-secrets -p '{"ROUTER_UPSTREAM_API_KEY":"<your-usai-key>"}'
+
+# 2. Bind it: uncomment the `services:` block at the bottom of deploy/manifest.yml
+#       services:
+#         - model-router-secrets
+
+# 3. Push (first deploy).
 cf push -f deploy/manifest.yml
+
+# 4. Confirm it came up and discovered the catalog.
+APP_URL="https://$(cf app model-router-service | awk '/routes:/{print $2}')"
+curl -s "$APP_URL/healthz"   # {"status":"ok"}            (liveness, no upstream call)
+curl -s "$APP_URL/readyz"    # {"status":"ready","candidates":N}  (catalog loaded)
 ```
 
-The app binds `$PORT` automatically. Non-secret config lives in the manifest;
-keys come from the bound service.
+**What ships in the manifest (non-secret):** `ROUTER_UPSTREAM_BASE_URL`,
+`ROUTER_JUDGE_MODEL`, `ROUTER_DEFAULT_MODEL`, and **`ROUTER_JUDGE_ENABLED: "false"`**
+— the deterministic scorer is the default, so cloud.gov routes with **no
+per-prompt upstream judge call** out of the box. To turn the judge on later
+without a redeploy:
+
+```bash
+cf set-env model-router-service ROUTER_JUDGE_ENABLED true
+cf restage model-router-service
+```
+
+**Secret rotation:** `cf uups model-router-secrets -p '{"ROUTER_UPSTREAM_API_KEY":"<new>"}'`
+then `cf restage model-router-service`.
+
+**TLS trust on cloud.gov:** leave `ROUTER_CA_BUNDLE` **unset** — cloud.gov egress
+is not TLS-intercepted, so certifi's default bundle is correct (the Zscaler
+`ROUTER_CA_BUNDLE` dance is a *host-only* concern).
+
+**Point OpenCode at it:** once `$APP_URL/readyz` is ready, the `model-router-proxy`
+kit (or a manual `model-router-toggle --harness opencode on --url "$APP_URL"`)
+flips OpenCode's `baseURL` to `$APP_URL/v1`. The sandbox must be allowed to egress
+to that cloud.gov host (add it to your project's egress kit).
+
+> **Notes.** `runtime.txt` pins the buildpack to Python 3.12 (where the bounded
+> dependency ranges resolve to prebuilt wheels). `memory: 256M` in the manifest
+> is sized for the stdlib scorer path; if you enable the judge and see memory
+> pressure under load, bump it. The Dockerfile is provided for container-based
+> targets; cloud.gov uses the buildpack + manifest, not the Dockerfile.
 
 ## Test
 
