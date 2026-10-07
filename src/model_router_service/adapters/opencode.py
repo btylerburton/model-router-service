@@ -23,26 +23,54 @@ def _default_config() -> str:
 
 
 def _strip_jsonc(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    """Strip JSONC comments and trailing commas, as a SINGLE PASS that tracks
+    string state across the whole document (not per line).
+
+    A per-line scanner desyncs on real OpenCode configs: a string value that
+    contains `//` (a URL, or a comment-like phrase), or `//` inside one line
+    while a `"` opened on a previous line, made the scanner treat code as a
+    comment (or vice versa) and drop a brace/comma — leaving two top-level
+    fragments and a json "Extra data" error. This walks the text once:
+      * inside a string, only `\\` escaping and the closing `"` matter;
+      * outside a string, `//` runs to end-of-line and `/* */` to its close.
+    Then trailing commas before } or ] are removed.
+    """
     out = []
-    for line in text.splitlines():
-        in_str = esc = False
-        cut = None
-        for i, ch in enumerate(line):
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
+    i, n = 0, len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
                 continue
             if ch == '"':
-                in_str = not in_str
-                continue
-            if not in_str and ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
-                cut = i
+                in_str = False
+            i += 1
+            continue
+        # not in a string
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            # line comment: skip to newline (keep the newline)
+            j = text.find("\n", i)
+            if j == -1:
                 break
-        out.append(line[:cut] if cut is not None else line)
-    joined = "\n".join(out)
+            i = j
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            # block comment: skip to the closing */
+            j = text.find("*/", i + 2)
+            i = (j + 2) if j != -1 else n
+            continue
+        out.append(ch)
+        i += 1
+    joined = "".join(out)
     return re.sub(r",(\s*[}\]])", r"\1", joined)
 
 

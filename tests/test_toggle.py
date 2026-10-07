@@ -61,6 +61,31 @@ def test_opencode_jsonc_with_comments(tmp_path):
     assert data["model"] == "usai/foo"
 
 
+def test_opencode_real_merged_config_round_trips(tmp_path):
+    """Regression: the real kit-merged global config from a sandbox (p1) failed
+    to parse with the old per-line JSONC stripper — a `https://` URL in a string
+    value and `//` inside comments desynced its line-local string tracking,
+    truncating the document ("Extra data: line 73"). The single-pass stripper
+    must read it, return the baseURL, and round-trip a flip without corrupting
+    the top-level keys / permission globs."""
+    import pathlib
+    src = pathlib.Path(__file__).parent / "fixtures" / "opencode-global-real.jsonc"
+    cfg = tmp_path / "opencode.jsonc"
+    cfg.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    a = OpenCodeAdapter(config_path=str(cfg))
+    assert a.detect()
+    assert a.get_base_url() == GATEWAY  # it reads the real file now
+    a.set_base_url(PROXY_V1)
+    data = json.loads(cfg.read_text())  # strict JSON after write
+    assert data["provider"]["usai"]["options"]["baseURL"] == PROXY_V1
+    # nothing else clobbered: the permission block + other top-level keys stay
+    assert "permission" in data
+    assert data["permission"]["read"]["*.env"] == "deny"
+    assert {"$schema", "provider", "permission", "model"}.issubset(data)
+    a.clear_base_url()
+    assert a.get_base_url() is None
+
+
 def test_opencode_missing_provider_raises(tmp_path):
     cfg = tmp_path / "opencode.jsonc"
     cfg.write_text(json.dumps({"provider": {}}))
