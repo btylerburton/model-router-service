@@ -95,6 +95,12 @@ W_NOVELTY = 0.20
 # lower so scope/novelty alone don't demand the most expensive model.
 DOMINANT = {"depth": 0.90, "breadth": 0.70, "novelty": 0.66}
 
+# Bonus when the TWO strongest signals are both genuinely firing (corroboration).
+# Keeps single-signal prompts where they are, but lets a deep+broad task (a
+# thorough PR review) climb a band. Bounded by the product of the two top
+# sub-scores, so it only matters when both are substantial.
+CORROBORATION = 0.16
+
 # Each entry contributes to a sub-score; a sub-score is min(1.0, hits * step)
 # so a few strong cues saturate it. `step` is per-matched-pattern weight.
 _DEPTH_PATTERNS = [
@@ -114,6 +120,15 @@ _BREADTH_PATTERNS = [
     r"\bcross[- ]file\b", r"\bwhole[- ]system\b", r"\b\d{3,} lines?\b",
     r"\b\d+ (models?|services?|modules?|components?)\b", r"\bmicroservices?\b",
     r"\bdistributed\b", r"\bsystem[- ]wide\b",
+    # Review/audit-class work implies reading a whole change set (a PR diff spans
+    # many files; an audit sweeps the codebase) — genuine BREADTH, not just
+    # depth. Without this a "review this PR" scored breadth=0 and capped at
+    # 'moderate'; these let a review climb toward 'hard' for the right reason.
+    r"\breview (this|the|my)? ?(pr|pull request|diff|change ?set|changes)\b",
+    r"\bcode review\b", r"\baudit\b", r"\bgo over (the|this|all)\b",
+    r"\bpull request\b", r"\bwhat .*(hasn'?t|has not) been (said|covered|mentioned)\b",
+    r"\bupgrad(e|able|eable)\b", r"\bdependenc(y|ies)\b", r"\boutdated\b",
+    r"\bwhich .*(can|could) be (upgraded|updated|removed)\b",
 ]
 _NOVELTY_PATTERNS = [
     r"\bdesign\b", r"\barchitect(ure|ing)?\b", r"\bfrom scratch\b",
@@ -317,7 +332,18 @@ def grade_from_subscores(depth: float, breadth: float, novelty: float) -> Reason
         breadth * DOMINANT["breadth"],
         novelty * DOMINANT["novelty"],
     )
-    r = max(mean, dominant)
+    # Corroboration bonus: TWO strongly-firing signals is harder than one. A deep
+    # AND broad task (e.g. a thorough PR review: reason about correctness across a
+    # whole diff) should out-rank a single-signal task, but a pure weighted mean
+    # drags it down via the zero third signal, and the single-dominant term can't
+    # see the second signal at all. Add a bounded bonus when the two highest
+    # sub-scores are both strong, so depth+breadth corroboration can reach 'hard'
+    # without inflating any single-signal weight (which would over-promote).
+    top2 = sorted((depth, breadth, novelty), reverse=True)[:2]
+    corroboration = 0.0
+    if top2[1] >= 0.5:  # a genuine second signal, not noise
+        corroboration = CORROBORATION * top2[0] * top2[1]
+    r = min(1.0, max(mean, dominant) + corroboration)
     band, floor = band_for(r)
     return ReasoningScore(r=r, depth=depth, breadth=breadth, novelty=novelty, band=band, floor=floor)
 

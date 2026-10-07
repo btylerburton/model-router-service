@@ -59,10 +59,21 @@ class Router:
         self._profiles = profiles
         self._default = default_model
         self._judge = judge
+        # Cheapest CHAT model in the catalog (profiles are already chat-only — the
+        # catalog excludes embeddings/rerankers). Used as the abstain landing
+        # model so a routable-but-trivial request (band 'none', r≈0) goes to the
+        # cheapest model rather than the mid-tier default_model.
+        self._cheapest = (
+            min(profiles, key=lambda p: p.cost_rank).id if profiles else default_model
+        )
 
     @property
     def profiles(self) -> list[ModelProfile]:
         return self._profiles
+
+    @property
+    def cheapest(self) -> str:
+        return self._cheapest
 
     def _cheapest_at_or_above(self, candidates: list[ModelProfile]) -> Optional[ModelProfile]:
         if not candidates:
@@ -118,11 +129,16 @@ class Router:
                 reasoning=scored.reasoning, demands=scored.demands,
             )
 
-        # 4. Last resort: configured default (fail-open landing model).
+        # 4. Scorer abstained (band 'none', no hard demand). The request is still
+        # a real chat turn — route it to the CHEAPEST chat model, not the
+        # mid-tier default_model. (default_model remains the FAIL-OPEN landing for
+        # genuine errors, handled by the caller.) This keeps trivial asks cheap
+        # ("[1,3,2,12] sort this" → cheapest, not sonnet) while preserving a
+        # distinct, auditable "default" path for actual failures.
         return Decision(
-            model=self._default,
-            reason="scorer abstained and no judge pick; using default_model",
-            via="default",
+            model=self._cheapest,
+            reason="scorer abstained (band none); using cheapest chat model",
+            via="scorer",
             reasoning=scored.reasoning,
             demands=scored.demands,
         )

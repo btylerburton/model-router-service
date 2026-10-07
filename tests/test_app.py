@@ -276,3 +276,22 @@ def test_feedback_disabled_by_default_returns_404():
     with _client(settings, transport) as c:
         r = c.post("/feedback", json={"model": "claude_4_8_opus", "prompt": "x"})
     assert r.status_code == 404
+
+
+def test_abstain_routes_to_cheapest_not_default():
+    """A routable but trivial request (scorer abstains, band 'none') must go to
+    the CHEAPEST chat model, not the mid-tier default_model. Regression for the
+    live log where '[1,3,2,12] sort this' went to sonnet (default)."""
+    record = {}
+    settings = _settings(judge_enabled=False, default_model="claude_4_5_sonnet")
+    transport = _mock_transport(record=record)
+    with _client(settings, transport) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "gpt_5_5_default_v2",
+            "messages": [{"role": "user", "content": "[1,3,2,12] sort this array"}],
+        })
+    assert r.status_code == 200
+    # cheapest in the mock catalog is haiku (cost_rank 1), NOT sonnet (the default)
+    assert record["forwarded_model"] == "claude_4_5_haiku"
+    hdr = {k.lower(): v for k, v in r.headers.items()}["x-model-router-decision"]
+    assert "cheapest" in hdr

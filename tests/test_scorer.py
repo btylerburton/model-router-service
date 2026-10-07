@@ -112,6 +112,36 @@ def test_from_upstream_ids_maps_and_drops_embeddings():
     assert "unknown-xyz" not in got
 
 
+def test_from_upstream_ids_drops_cohere_embedding_but_keeps_command():
+    # Regression: cohere_english_v3 is an EMBEDDING model with no obvious marker
+    # (it was chosen via=utility in a live log). It must be excluded, while a real
+    # Cohere Command chat model is kept.
+    ids = ["cohere_english_v3", "command-r", "rerank-english-v3", "claude_4_5_haiku"]
+    got = {p.id for p in from_upstream_ids(ids)}
+    assert "cohere_english_v3" not in got   # embedding
+    assert "rerank-english-v3" not in got   # reranker
+    assert "command-r" in got               # chat
+    assert "claude_4_5_haiku" in got
+
+
+def test_review_pr_reaches_hard_tier():
+    # A thorough PR review reasons about correctness ACROSS a whole diff — depth
+    # + breadth corroborate, so it should climb to 'hard', not cap at 'moderate'.
+    rs = scorer.reasoning_score(
+        "review this pull request diff for correctness and edge cases, "
+        "find race conditions and anything not already covered in prior review"
+    )
+    assert rs.band in {"hard", "extreme"}
+    assert rs.floor >= 4
+
+
+def test_corroboration_does_not_over_promote_single_signal():
+    # A single strong signal must NOT get the corroboration bonus (no genuine
+    # second signal) — a bare proof stays extreme, a refactor stays moderate.
+    assert scorer.reasoning_score("refactor this module and add unit tests").band == "moderate"
+    assert scorer.reasoning_score("fix a quick typo in a comment").band == "none"
+
+
 def test_from_catalog_file(tmp_path):
     p = tmp_path / "roster.json"
     p.write_text(json.dumps({"models": [

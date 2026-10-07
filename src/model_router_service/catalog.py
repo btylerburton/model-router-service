@@ -24,6 +24,8 @@ _FAMILY_PROFILES: list[dict] = [
     {"prefix": "gemini-2.5-flash-lite", "name": "Gemini Flash Lite", "capabilities": ["coding", "fast", "cheap", "vision", "long_context"], "context": 1000000, "cost_rank": 1},
     {"prefix": "gemini-2.5-flash", "name": "Gemini Flash", "capabilities": ["coding", "fast", "cheap", "vision", "long_context"], "context": 1000000, "cost_rank": 2},
     {"prefix": "llama", "name": "Llama", "capabilities": ["coding", "fast", "cheap"], "context": 128000, "cost_rank": 1},
+    {"prefix": "command", "name": "Cohere Command", "capabilities": ["coding", "cheap", "fast"], "context": 128000, "cost_rank": 1},
+    {"prefix": "cohere_english", "name": "Cohere Embedding", "capabilities": [], "context": 512, "cost_rank": 1, "non_chat": True},
     {"prefix": "cohere", "name": "Cohere", "capabilities": ["coding", "cheap", "fast"], "context": 128000, "cost_rank": 1},
     {"prefix": "claude_4_5_sonnet", "name": "Claude Sonnet", "capabilities": ["coding", "reasoning", "vision"], "context": 200000, "cost_rank": 3},
     {"prefix": "claude_4_6_sonnet", "name": "Claude 4.6 Sonnet", "capabilities": ["coding", "reasoning", "vision", "long_context"], "context": 1000000, "cost_rank": 3},
@@ -39,8 +41,24 @@ _FAMILY_PROFILES: list[dict] = [
     {"prefix": "claude", "name": "Claude", "capabilities": ["coding", "reasoning", "vision"], "context": 200000, "cost_rank": 3},
 ]
 
-# Embedding/non-chat ids we must never route a chat completion to.
-_NON_CHAT_PREFIXES = ("text-embedding", "embed")
+# Embedding / reranker / non-chat ids we must NEVER route a chat completion to.
+# These frequently share a vendor prefix with chat models (e.g. cohere_english_v3
+# is an EMBEDDING model, not Cohere Command chat), so match on these id markers
+# BEFORE family-prefix matching. A non-chat model picked as "cheapest" would make
+# utility/abstain routing forward chat to an embedder (observed: cohere_english_v3
+# chosen via=utility) — it cannot serve /chat/completions.
+_NON_CHAT_MARKERS = (
+    "text-embedding", "embed", "embedding",
+    "rerank", "reranker",
+    "whisper", "tts", "audio", "speech",
+    "moderation", "guard",
+    "image-generation", "dall-e", "dalle", "imagen",
+)
+
+
+def _is_non_chat(model_id: str) -> bool:
+    mid = model_id.lower()
+    return any(marker in mid for marker in _NON_CHAT_MARKERS)
 
 
 def _match_family(model_id: str) -> dict | None:
@@ -67,17 +85,21 @@ def _profile_from_dict(d: dict) -> ModelProfile:
 def from_catalog_file(path: str) -> list[ModelProfile]:
     data = json.loads(Path(path).read_text())
     raw = data["models"] if isinstance(data, dict) else data
-    return [_profile_from_dict(d) for d in raw]
+    # Exclude non-chat models (embeddings/rerankers/etc.) even from an explicit
+    # roster — they are never a valid /chat/completions target.
+    return [_profile_from_dict(d) for d in raw if not _is_non_chat(str(d.get("id", "")))]
 
 
 def from_upstream_ids(ids: list[str]) -> list[ModelProfile]:
     """Map live gateway ids to family capability profiles (chat models only)."""
     profiles: list[ModelProfile] = []
     for mid in ids:
-        if any(mid.startswith(p) for p in _NON_CHAT_PREFIXES):
+        if _is_non_chat(mid):
             continue
         fam = _match_family(mid)
-        if not fam:
+        if not fam or fam.get("non_chat"):
+            # No chat family match, or an explicitly non-chat family (e.g. the
+            # cohere_english_* embedding ids that don't carry an obvious marker).
             continue
         profiles.append(
             ModelProfile(
