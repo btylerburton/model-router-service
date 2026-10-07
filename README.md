@@ -134,6 +134,29 @@ cp .env.example .env
 docker compose up --build        # http://localhost:8080
 ```
 
+### Reaching a host-run service from a sandbox
+
+The default `127.0.0.1` bind is **loopback-only** — a sandbox/container cannot
+reach it, even via `host.docker.internal`. To route an in-sandbox OpenCode
+through a service on your host, bind an interface the Docker bridge can see:
+
+```bash
+scripts/run-local.sh                # bind for sandbox reachability + start
+scripts/run-local.sh --print-only   # just show the bind + the sandbox URL
+```
+
+The script prefers the narrowest reachable interface (the Docker bridge gateway
+if it can detect one) and only falls back to `0.0.0.0` (all interfaces) with an
+explicit warning. The sandbox then points at the **host bridge**, never the bind
+address: `MODEL_ROUTER_URL=http://host.docker.internal:8080`.
+
+> **Exposure note.** Binding beyond loopback makes the service reachable from
+> other hosts on your network, and it forwards your USAi key upstream. Run it
+> only on a trusted/firewalled network and stop it when done. **On cloud.gov you
+> do none of this** — the buildpack sets `$PORT` and the app binds `0.0.0.0:$PORT`
+> automatically (see "Deploy to cloud.gov"); the sandbox reaches it at the public
+> app route, not `host.docker.internal`.
+
 ## TLS trust (`ROUTER_CA_BUNDLE`) — Zscaler and other inspecting proxies
 
 **Diagnose before you set anything.** The common instinct — "I'm on Zscaler, so
