@@ -74,9 +74,17 @@ class Settings(BaseSettings):
     )
 
     # Judge invocation controls.
+    #
+    # DEFAULT OFF. The deterministic graded scorer (scorer.py) routes the
+    # ~15-model USAi catalog in sub-millisecond, offline, with no network call —
+    # so it is the right DEFAULT path. An LLM-as-judge adds a full extra inference
+    # round-trip to the upstream BEFORE every prompt, which is the latency that
+    # made the earlier judge-on build unusable for anything but a POC. Keep the
+    # judge as an OPT-IN escalation (ROUTER_JUDGE_ENABLED=true) for deployments
+    # that have measured the scorer misrouting and accept the per-turn cost.
     judge_enabled: bool = Field(
-        default=True,
-        description="If false, routing uses the deterministic scorer only (no LLM judge call).",
+        default=False,
+        description="If true, an LLM judge ranks candidates per prompt (adds latency). Default false = deterministic scorer only.",
     )
     judge_timeout_s: float = Field(
         default=4.0,

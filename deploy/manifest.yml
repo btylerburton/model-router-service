@@ -28,7 +28,10 @@ applications:
       ROUTER_UPSTREAM_BASE_URL: https://api.gsa.usai.gov/api/v1
       ROUTER_JUDGE_MODEL: claude_4_5_haiku
       ROUTER_DEFAULT_MODEL: claude_4_5_sonnet
-      ROUTER_JUDGE_ENABLED: "true"
+      # Judge OFF by default: the deterministic scorer routes with no per-prompt
+      # upstream call (fast). Flip to "true" only to add the LLM judge escalation
+      # (adds a full inference round-trip per prompt). See README "How it decides".
+      ROUTER_JUDGE_ENABLED: "false"
       ROUTER_JUDGE_TIMEOUT_S: "4"
       ROUTER_LOG_LEVEL: INFO
     # Bind the secrets service that supplies ROUTER_UPSTREAM_API_KEY etc.:

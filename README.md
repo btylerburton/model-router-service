@@ -14,20 +14,30 @@ OpenCode.
 
 ## How it decides
 
-Two-stage, mirroring hermes/jev's two-call shape — but the engine is yours:
+The default path is **one stage**: the deterministic graded scorer. An LLM judge
+is an **opt-in second stage** (off by default — see "Judge: opt-in" below).
 
-1. **Graded deterministic scorer** (offline, zero-dependency). The request is
+1. **Graded deterministic scorer** (offline, zero-dependency, sub-millisecond,
+   **no network call** — this is the DEFAULT engine). The request is
    scored on a continuous **reasoning difficulty** `r ∈ [0,1]` from three signals
    — **depth** (proofs/derivation), **breadth** (cross-file/system scope), and
    **novelty** (design-from-scratch) — combined as `max(weighted_mean,
    strongest_signal)`. `r` maps to a **band** (`none`/`light`/`moderate`/`hard`/
    `extreme`) with a **minimum cost-rank floor**. Capability demands
    (vision/long-context) still gate the candidate set.
-2. **LLM judge** — one small call to a cheap model (configurable; defaults to the
-   same gateway + a cheap model id) ranks the floored shortlist AND may return
-   its own depth/breadth/novelty sub-scores (same call, no extra latency). When
-   it does, those are authoritative and can raise the floor. The judge is
-   constrained to the provided ids and its JSON reply is validated.
+2. **LLM judge** *(opt-in; `ROUTER_JUDGE_ENABLED=true`)* — one small call to a
+   cheap model (configurable; defaults to the same gateway + a cheap model id)
+   ranks the floored shortlist AND may return its own depth/breadth/novelty
+   sub-scores. When it does, those are authoritative and can raise the floor. The
+   judge is constrained to the provided ids and its JSON reply is validated.
+
+**Judge: opt-in, and why.** The judge adds a *full extra inference round-trip to
+the upstream before every prompt* — real added latency on every turn (the earlier
+judge-on build timed out in live use). For the ~15-model USAi catalog the
+deterministic scorer routes correctly on its own, so the judge is **off by
+default** and is best reserved as an escalation after you've *measured* the scorer
+misrouting. Turn it on with `ROUTER_JUDGE_ENABLED=true` when the per-turn cost is
+acceptable.
 
 **Why graded, not boolean:** a boolean `reasoning` demand made the top tier
 *unreachable* — on the USAi catalog every rank-4/5 model (Opus/GPT-5) has the
@@ -91,7 +101,7 @@ an upstream gateway + key + judge model + default model). See `.env.example`.
 | `ROUTER_DEFAULT_MODEL` | ✅ | Fail-open landing model |
 | `ROUTER_JUDGE_BASE_URL` / `ROUTER_JUDGE_API_KEY` | — | Judge endpoint override (defaults to upstream) |
 | `ROUTER_CATALOG_PATH` | — | JSON roster of candidate profiles (else discovered from `/models`) |
-| `ROUTER_JUDGE_ENABLED` | — | `false` → scorer-only, no judge call |
+| `ROUTER_JUDGE_ENABLED` | `false` | `true` adds the per-prompt LLM judge (extra latency); default = scorer-only |
 | `ROUTER_JUDGE_TIMEOUT_S` / `ROUTER_JUDGE_CACHE_SIZE` | — | Judge call tuning |
 | `ROUTER_BYPASS_HEADER` / `ROUTER_DECISION_HEADER` | — | Pin + audit header names |
 | `MODEL_ROUTER_TUNING` | — | Path to a band-edge/weight overrides file (written by `recalibrate`) |
