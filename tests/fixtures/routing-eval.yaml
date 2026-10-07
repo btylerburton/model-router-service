@@ -1,0 +1,179 @@
+# Routing evaluation corpus
+#
+# A labeled set of prompts with the band the DETERMINISTIC scorer is expected to
+# assign. This is the regression guard and the evidence behind the scorer's
+# constants: a reviewer asking "how do you know the routing is right?" is
+# answered by this file + test_eval.py, and the recalibrate pass has a concrete
+# not-regress target.
+#
+# Bands (increasing cost-rank floor): none < light < moderate < hard < extreme.
+#   none      floor 0  -> abstain; router sends to the cheapest chat model
+#   light     floor 1  -> cheapest tier (haiku/flash-lite)
+#   moderate  floor 3  -> mid tier (sonnet)
+#   hard      floor 4  -> strong tier (gpt-5.x)
+#   extreme   floor 5  -> top tier (opus)
+#
+# status:
+#   assert      — the test FAILS if the scored band != expected (a locked
+#                 behavior; changing it is a deliberate, reviewed decision).
+#   known_gap   — a documented LIMITATION of the keyword heuristic. The test
+#                 records the CURRENTLY-OBSERVED band and does not fail, but
+#                 prints it so drift is visible. These are the cases the LLM
+#                 judge (opt-in) or a future local model would most improve.
+#
+# WHY two statuses: the heuristic is keyword-based and English-only; it cannot
+# understand intent. Pretending every case is a hard assertion would be dishonest
+# (and brittle). Marking the genuine misses as known_gap is the accurate posture:
+# the scorer is correct on clear-signal prompts and degrades gracefully (toward
+# cheaper) on subtle ones — never toward silently-expensive.
+#
+# NOTE ON PROMPT TEXT: the scorer sees the LAST USER MESSAGE only (the proxy
+# strips the harness persona). Several prompts here come in a TERSE form (what a
+# user types) and a FULL form (what the harness expands with file/PR context);
+# both are included where they route differently, because the live system scores
+# the expanded text.
+
+version: 1
+
+cases:
+  # ---- trivial / mechanical: must stay cheap (abstain -> cheapest) ----------
+  - id: typo
+    prompt: "fix a quick typo in a comment"
+    expect: none
+    status: assert
+    rationale: "Pure mechanical edit; no reasoning. Must not float above cheapest."
+
+  - id: rename-var
+    prompt: "rename the variable userId to accountId"
+    expect: none
+    status: assert
+    rationale: "Mechanical; negative-novelty cue suppresses any lift."
+
+  - id: sort-array
+    prompt: "[1,3,2,12] sort this array"
+    expect: none
+    status: assert
+    rationale: "Trivial. Live log regression: previously abstained to sonnet; now cheapest."
+
+  - id: reverse-string
+    prompt: "write a function to reverse a string"
+    expect: none
+    status: assert
+    rationale: "Textbook one-liner; no depth/breadth."
+
+  - id: explain-regex
+    prompt: "explain what this regex does"
+    expect: none
+    status: assert
+    rationale: "Explanation of a small artifact; cheap."
+
+  # ---- informational questions: cheap -------------------------------------
+  - id: what-is-cloud-function
+    prompt: "what is a cloud function compared to a server?"
+    expect: none
+    status: assert
+    rationale: "Prose/definition question, not a task."
+
+  - id: node-version
+    prompt: "what node version is this project using?"
+    expect: none
+    status: assert
+    rationale: "Single-fact lookup."
+
+  # ---- light engineering: cheapest-to-low ---------------------------------
+  - id: add-logging
+    prompt: "add debug logging to the auth handler"
+    expect: light
+    status: assert
+    rationale: "Small, localized change; modest effort signal."
+
+  - id: deps-upgrade
+    prompt: "what apps/frontend dependencies can be upgraded?"
+    expect: light
+    status: assert
+    rationale: "Breadth-ish (sweep deps) but not deep; a scan, not analysis."
+
+  # ---- moderate engineering: mid tier -------------------------------------
+  - id: refactor-tests
+    prompt: "refactor this module and add unit tests"
+    expect: moderate
+    status: assert
+    rationale: "Ordinary engineering effort; warrants mid-tier, not top."
+
+  - id: implement-endpoint
+    prompt: "implement a pagination endpoint for the projects API"
+    expect: moderate
+    status: assert
+    rationale: "Real feature work; effort cues lift it out of abstain."
+
+  - id: db-migration
+    prompt: "write a migration to split the users table into users and profiles"
+    expect: moderate
+    status: known_gap
+    rationale: >
+      SHOULD be moderate (schema change with data-integrity implications), but
+      'migrate/migration' + 'schema' effort cues currently land it at 'none'.
+      Candidate for a scorer signal add or a judge call.
+
+  # ---- hard: strong tier --------------------------------------------------
+  - id: review-pr-full
+    prompt: "review this pull request diff for correctness and edge cases, find race conditions and anything not already covered in prior review comments"
+    expect: hard
+    status: assert
+    rationale: >
+      Thorough review reasons about correctness ACROSS a whole diff (depth +
+      breadth corroborate). This is the harness-expanded form the live system
+      actually scores.
+
+  - id: security-review
+    prompt: "do a security review of the file upload endpoint for injection and path traversal"
+    expect: hard
+    status: known_gap
+    rationale: >
+      SHOULD be hard (adversarial reasoning about a vuln surface), but with only
+      'security review' matching, depth=0.4 -> light. Needs a security/threat
+      depth signal, or the judge. Degrades CHEAP (safe direction), not expensive.
+
+  - id: debug-race
+    prompt: "there is an intermittent race condition in the job queue, find the root cause"
+    expect: hard
+    status: known_gap
+    rationale: >
+      SHOULD be hard (concurrency root-cause is deep), currently moderate
+      (r=0.72, one notch below the 0.75 hard edge). Borderline; a prime
+      recalibrate candidate once corroborated by real corrections.
+
+  # ---- extreme: top tier --------------------------------------------------
+  - id: ratelimiter-proof
+    prompt: "design a distributed rate limiter and prove it correct under adversarial conditions"
+    expect: extreme
+    status: assert
+    rationale: "Design + correctness proof + adversarial + distributed: top tier."
+
+  - id: paxos-proof
+    prompt: "prove this paxos variant correct with formal verification under adversarial conditions"
+    expect: extreme
+    status: assert
+    rationale: "Pure formal-verification; the hardest class. Depth saturates."
+
+  - id: architect-from-scratch
+    prompt: "design the architecture for a new multi-tenant billing service from scratch"
+    expect: hard
+    status: known_gap
+    rationale: >
+      SHOULD be hard (greenfield system design), currently moderate (novelty
+      saturates but no depth/breadth corroboration). Design-only prompts are a
+      known under-score; judge or a novelty-weight review would address it.
+
+  # ---- anchors that must NOT over-promote (guard against tuning drift) ----
+  - id: anchor-typo-stays-none
+    prompt: "just fix this one-line formatting issue"
+    expect: none
+    status: assert
+    rationale: "Guard: mechanical cues must keep the floor at cheapest even if edges move."
+
+  - id: anchor-proof-stays-extreme
+    prompt: "formally verify the correctness of this consensus algorithm"
+    expect: extreme
+    status: assert
+    rationale: "Guard: a saturated-depth proof must stay top tier even if edges move."
