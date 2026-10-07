@@ -57,9 +57,32 @@ explicit `model` and the request is forwarded untouched.
 
 **Auditable:** the chosen model, a decision id, and the rationale are returned in
 the `x-model-router-decision` response header, and one JSON line per routed turn
-(`prompt_hash, r, band, demands, winner`) is written to the decision log.
+is written to the decision log. The log records **metadata only by default**
+(`prompt_hash, chosen, via, band, demands`) — **not** the raw prompt text, which
+carries repo contents / PR bodies / file paths. Set `ROUTER_LOG_PROMPTS=true`
+only for local debugging.
+
+**Harness utility calls bypass routing.** Agent harnesses (OpenCode/Paseo) make
+non-task calls through the same endpoint — thread-title generation,
+summarization, compaction. These are detected by their system prompt and forced
+to the **cheapest** model (`via=utility`), skipping scoring, since routing them
+on "difficulty" is meaningless. Toggle with `ROUTER_PASSTHROUGH_UTILITY`
+(default on); name the model with `ROUTER_CHEAPEST_MODEL` (default: cheapest in
+the catalog by `cost_rank`).
+
+> **What is scored:** the **last user message**, not the harness system persona.
+> Folding the fixed `"You are OpenCode, …"` preamble into the scored text
+> diluted every turn to band `none`; scoring the user request alone is what makes
+> routing track real task difficulty.
 
 ## Steering the router after a bad route
+
+> **Status: the correction UX is not built yet, so feedback is OFF by default**
+> (`ROUTER_FEEDBACK_ENABLED=false`). With it off, the `/feedback` endpoint
+> returns 404 and no recent-decision state is retained — zero per-turn overhead.
+> The CLI below still works offline against the local feedback/tuning files. The
+> decision to route is **not surfaced to the user**; wiring corrections into an
+> actual UX flow is future work. Enable the endpoint only once that exists.
 
 When the router picks a poor model, you don't edit code — you give feedback and
 recalibrate. A correction is just "this prompt should have used `<model>`"; the
@@ -77,8 +100,8 @@ model-router feedback --prompt "refactor this module and add tests" --model gpt-
 model-router recalibrate --dry-run
 model-router recalibrate
 
-# or from a running proxy / the agent, correct a turn by its decision id
-# (from the x-model-router-decision header):
+# or from a running proxy, correct a turn by its decision id — ONLY when
+# ROUTER_FEEDBACK_ENABLED=true (else 404):
 curl -s $ROUTER/feedback -H 'content-type: application/json' \
   -d '{"id":"<decision_id>","model":"claude_4_8_opus","note":"needed opus"}'
 ```
@@ -103,6 +126,10 @@ an upstream gateway + key + judge model + default model). See `.env.example`.
 | `ROUTER_CATALOG_PATH` | — | JSON roster of candidate profiles (else discovered from `/models`) |
 | `ROUTER_JUDGE_ENABLED` | `false` | `true` adds the per-prompt LLM judge (extra latency); default = scorer-only |
 | `ROUTER_JUDGE_TIMEOUT_S` / `ROUTER_JUDGE_CACHE_SIZE` | — | Judge call tuning |
+| `ROUTER_PASSTHROUGH_UTILITY` | `true` | Force harness utility calls (title-gen/summarize/compaction) to the cheapest model |
+| `ROUTER_CHEAPEST_MODEL` | — | Model id for utility pass-through (default: cheapest by `cost_rank`) |
+| `ROUTER_LOG_PROMPTS` | `false` | Write raw prompt text to the decision log (debug only; default = hash only) |
+| `ROUTER_FEEDBACK_ENABLED` | `false` | Enable `/feedback` + recent-decision ring (correction UX not built; default off) |
 | `ROUTER_BYPASS_HEADER` / `ROUTER_DECISION_HEADER` | — | Pin + audit header names |
 | `MODEL_ROUTER_TUNING` | — | Path to a band-edge/weight overrides file (written by `recalibrate`) |
 | `MODEL_ROUTER_FEEDBACK` | — | Path to the corrections store (JSONL) |

@@ -153,3 +153,126 @@ def test_healthz():
     transport = _mock_transport()
     with _client(settings, transport) as c:
         assert c.get("/healthz").json()["status"] == "ok"
+
+
+# --- Paseo/OpenCode-shaped behavior ----------------------------------------
+
+OPENCODE_SYS = (
+    "You are OpenCode, You and the user share the same workspace and collaborate "
+    "to achieve the user's goals. You are a deeply pragmatic, effective software "
+    "engineer. You communicate efficiently, keeping it short."
+)
+TITLE_SYS = (
+    "You are a title generator. You output ONLY a thread title. Nothing else.\n"
+    "Generate a brief title that would help the user find this conversation later."
+)
+
+
+def test_scores_user_message_not_system_persona():
+    """Regression (Paseo): the OpenCode system persona must NOT be scored. A hard
+    user request behind the fixed persona should route on the USER text — not be
+    diluted to band 'none' by the boilerplate preamble (the live-log bug)."""
+    record = {}
+    settings = _settings(judge_enabled=False)  # deterministic scorer only
+    transport = _mock_transport(record=record)
+    with _client(settings, transport) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "gpt_5_5_default_v2",
+            "messages": [
+                {"role": "system", "content": OPENCODE_SYS},
+                {"role": "user", "content":
+                    "prove this distributed consensus protocol correct with a formal "
+                    "verification under adversarial conditions"},
+            ],
+        })
+    assert r.status_code == 200
+    # A hard reasoning ask must climb above the cheapest tier (not land on
+    # default via band 'none'). With the persona removed from scoring, the
+    # scorer grades the proof request and floors UP.
+    hdr = {k.lower(): v for k, v in r.headers.items()}["x-model-router-decision"]
+    assert "via=default" not in hdr.replace(": ", "=")  # not an abstain-to-default
+    assert record["forwarded_model"] != "gpt_5_5_default_v2"  # it rerouted
+
+
+def test_utility_title_gen_forced_to_cheapest():
+    """A harness title-generation call is detected by its system prompt and
+    forced to the cheapest model, skipping scoring (via=utility)."""
+    record = {}
+    settings = _settings(judge_enabled=False)  # cheapest == haiku in this catalog
+    transport = _mock_transport(record=record)
+    with _client(settings, transport) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "gpt_5_5_default_v2",
+            "messages": [
+                {"role": "system", "content": TITLE_SYS},
+                {"role": "user", "content": "what node version is this project using?"},
+            ],
+        })
+    assert r.status_code == 200
+    assert record["forwarded_model"] == "claude_4_5_haiku"  # cheapest by cost_rank
+    hdr = {k.lower(): v for k, v in r.headers.items()}["x-model-router-decision"]
+    assert "utility" in hdr
+
+
+def test_utility_passthrough_can_be_disabled():
+    record = {}
+    settings = _settings(judge_enabled=False, passthrough_utility=False)
+    transport = _mock_transport(record=record)
+    with _client(settings, transport) as c:
+        r = c.post("/v1/chat/completions", json={
+            "model": "x",
+            "messages": [
+                {"role": "system", "content": TITLE_SYS},
+                {"role": "user", "content": "what node version is this project using?"},
+            ],
+        })
+    assert r.status_code == 200
+    hdr = {k.lower(): v for k, v in r.headers.items()}["x-model-router-decision"]
+    assert "utility" not in hdr  # routed normally, not forced
+
+
+def test_decision_log_omits_raw_prompt_by_default(tmp_path, monkeypatch):
+    """The on-disk decision log must NOT contain raw prompt text by default —
+    only the hash (prompts carry repo contents / PR bodies / paths)."""
+    logf = tmp_path / "decisions.jsonl"
+    # _DECISION_LOG is module-level; patch it.
+    import model_router_service.app as appmod
+    monkeypatch.setattr(appmod, "_DECISION_LOG", str(logf))
+    record = {}
+    settings = _settings(judge_enabled=False)
+    transport = _mock_transport(record=record)
+    secret_text = "SENSITIVE repo path /home/agent/secret and PR body"
+    with _client(settings, transport) as c:
+        c.post("/v1/chat/completions", json={
+            "model": "x",
+            "messages": [
+                {"role": "system", "content": OPENCODE_SYS},
+                {"role": "user", "content": secret_text},
+            ],
+        })
+    written = logf.read_text()
+    assert "prompt_hash" in written
+    assert "SENSITIVE" not in written  # raw prompt not persisted
+    assert '"prompt"' not in written
+
+
+def test_decision_log_includes_prompt_when_opted_in(tmp_path, monkeypatch):
+    logf = tmp_path / "decisions.jsonl"
+    import model_router_service.app as appmod
+    monkeypatch.setattr(appmod, "_DECISION_LOG", str(logf))
+    settings = _settings(judge_enabled=False, log_prompts=True)
+    transport = _mock_transport(record={})
+    with _client(settings, transport) as c:
+        c.post("/v1/chat/completions", json={
+            "model": "x",
+            "messages": [{"role": "user", "content": "DEBUGMARKER fix a typo"}],
+        })
+    assert "DEBUGMARKER" in logf.read_text()
+
+
+def test_feedback_disabled_by_default_returns_404():
+    settings = _settings(judge_enabled=False)
+    transport = _mock_transport()
+    with _client(settings, transport) as c:
+        r = c.post("/feedback", json={"model": "claude_4_8_opus", "prompt": "x"})
+    assert r.status_code == 404

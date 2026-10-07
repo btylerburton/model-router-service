@@ -107,6 +107,40 @@ class Settings(BaseSettings):
         description="Response header carrying the chosen model + rationale for auditability.",
     )
 
+    # --- Harness utility-call pass-through ----------------------------------
+    # Agent harnesses (OpenCode/Paseo) make NON-TASK utility calls through the
+    # same endpoint — thread-title generation, summarization, compaction. These
+    # are not work to reason about; routing them on "difficulty" is meaningless.
+    # When enabled, a request whose system prompt matches a known utility
+    # signature is forced to the cheapest model and skips scoring entirely
+    # (logged via="utility"). Detection is on the SYSTEM prompt only.
+    passthrough_utility: bool = Field(
+        default=True,
+        description="Force known harness utility calls (title-gen, summarize, compaction) to the cheapest model, skipping routing.",
+    )
+    cheapest_model: str | None = Field(
+        default=None,
+        description="Model id for utility pass-through. Unset = cheapest in the catalog by cost_rank.",
+    )
+
+    # --- Decision logging ---------------------------------------------------
+    # The per-turn decision record is for DEVELOPER observability only; it is not
+    # surfaced to the user. By default it logs metadata (prompt_HASH, chosen,
+    # band, …) — NOT the raw prompt text — because prompts carry repo contents,
+    # paths, PR bodies, etc. Set ROUTER_LOG_PROMPTS=true ONLY for local debugging.
+    log_prompts: bool = Field(
+        default=False,
+        description="If true, write the (truncated) raw prompt text to the on-disk decision log. Default false = hash only.",
+    )
+    # The /feedback endpoint (correct-a-route) and its in-memory recent-decision
+    # ring exist for a tuning UX that is NOT built yet. Disabled by default so it
+    # adds zero per-turn work (no ring retention, endpoint returns 404). Enable
+    # when a correction UX is developed.
+    feedback_enabled: bool = Field(
+        default=False,
+        description="If true, retain recent decisions in memory and enable POST /feedback. Default false = no feedback overhead.",
+    )
+
     # Request timeout for the forwarded (upstream) call. Streaming responses are
     # not bounded by this once headers are received.
     upstream_timeout_s: float = Field(default=600.0)

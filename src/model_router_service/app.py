@@ -41,11 +41,12 @@ from .config import Settings, get_settings
 from .feedback import record_correction
 from .judge import Judge
 from .router import Router
+from .utility import is_utility_call
 
 log = logging.getLogger("model_router_service")
 
-# Decision log + an in-memory ring of recent decisions so a client can correct
-# "the last turn" by its decision id.
+# Decision log + an OPTIONAL in-memory ring of recent decisions (only retained
+# when feedback is enabled) so a client can correct "the last turn" by id.
 _DECISION_LOG = os.environ.get(
     "MODEL_ROUTER_DECISION_LOG", os.path.expanduser("~/.model-router/decisions.jsonl")
 )
@@ -53,9 +54,9 @@ _RECENT = collections.deque(maxlen=256)  # {id, prompt, chosen, reasoning, ts}
 
 
 def _log_decision(entry: dict) -> None:
-    """Append one JSON line per routed turn (prompt_hash, r, band, demands,
-    winner, …) and keep it in the recent ring. Best-effort; never raises."""
-    _RECENT.appendleft(entry)
+    """Append one JSON line per routed turn (metadata only by default) to the
+    on-disk decision log. Best-effort; never raises. (The in-memory recent ring
+    is maintained by the caller only when feedback is enabled.)"""
     try:
         os.makedirs(os.path.dirname(_DECISION_LOG), exist_ok=True)
         with open(_DECISION_LOG, "a", encoding="utf-8") as f:
@@ -68,35 +69,40 @@ def _truthy(value: str | None) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"} if value else False
 
 
-def _extract_request_text(body: dict) -> str:
-    """Flatten the chat messages into text the router/judge can read.
+def _content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(str(part.get("text", "")))
+                elif part.get("type") in {"image_url", "image"}:
+                    parts.append("[image]")  # a vision signal for the scorer
+        return " ".join(parts)
+    return ""
 
-    Uses the LAST user message primarily (the current turn), with a little
-    preceding context. Handles both string and content-part messages.
+
+def _extract_texts(body: dict) -> tuple[str, str]:
+    """Return (user_text, system_text).
+
+    user_text is the LAST user message — the actual request to route on. We do
+    NOT fold the system prompt into it: harness system prompts are a fixed
+    persona ("You are OpenCode, …") that dilutes the reasoning signal and made
+    every turn score as boilerplate. system_text is returned SEPARATELY, used
+    only to detect harness utility calls (title-gen/summarize/compaction).
     """
     messages = body.get("messages") or []
-
-    def _content_to_text(content) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        parts.append(str(part.get("text", "")))
-                    elif part.get("type") in {"image_url", "image"}:
-                        parts.append("[image]")  # a vision signal for the scorer
-            return " ".join(parts)
-        return ""
-
     user_msgs = [m for m in messages if m.get("role") == "user"]
-    text = _content_to_text(user_msgs[-1]["content"]) if user_msgs else ""
-    # Prepend a short slice of the latest system message for intent context.
     sys_msgs = [m for m in messages if m.get("role") == "system"]
-    if sys_msgs:
-        text = (_content_to_text(sys_msgs[-1]["content"])[:300] + "\n" + text).strip()
-    return text
+    user_text = _content_to_text(user_msgs[-1]["content"]) if user_msgs else ""
+    system_text = " ".join(_content_to_text(m.get("content")) for m in sys_msgs)
+    # Fallback: some clients send a bare `prompt` string, no messages array.
+    if not user_text and isinstance(body.get("prompt"), str):
+        user_text = body["prompt"]
+    return user_text, system_text
+
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -128,11 +134,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             default_model=settings.default_model,
             judge=judge,
         )
+        # Resolve the cheapest model once (for utility pass-through): explicit
+        # config wins, else the lowest cost_rank in the discovered catalog, else
+        # the default model as a safe floor.
+        cheapest = settings.cheapest_model
+        if not cheapest and profiles:
+            cheapest = min(profiles, key=lambda p: p.cost_rank).id
+        app.state.cheapest_model = cheapest or settings.default_model
         log.info(
-            "router ready: %d candidate models, judge=%s, default=%s",
+            "router ready: %d candidate models, judge=%s, default=%s, cheapest=%s, "
+            "utility_passthrough=%s, feedback=%s, log_prompts=%s",
             len(profiles),
             "on" if judge else "off",
             settings.default_model,
+            app.state.cheapest_model,
+            settings.passthrough_utility,
+            settings.feedback_enabled,
+            settings.log_prompts,
         )
         yield
         # SHUTDOWN.
@@ -169,13 +187,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def feedback(request: Request) -> Response:
         """Record a routing correction: 'this turn should have used <model>'.
 
+        DISABLED by default (ROUTER_FEEDBACK_ENABLED=false): the correction UX
+        is not built, and keeping it off means the recent-decision ring is not
+        retained and this endpoint adds no per-turn work. Returns 404 when off.
+
         Body: { "model": "<target id>", "prompt": "<text>" | "id": "<decision_id>",
                 "note": "<optional>" }
-        Either `prompt` or a decision `id` (from the audit header / decision log)
-        must be given. Back-solves the reasoning target and appends to the
-        feedback store (inert until `model-router recalibrate` runs). Never
-        changes routing in-flight.
         """
+        if not settings.feedback_enabled:
+            return JSONResponse(
+                {"error": "feedback disabled (set ROUTER_FEEDBACK_ENABLED=true to enable)"},
+                status_code=404,
+            )
         raw = await request.body()
         try:
             payload = json.loads(raw) if raw else {}
@@ -220,7 +243,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         requested_model = body.get("model")
         is_stream = bool(body.get("stream"))
-        request_text = _extract_request_text(body)
+        request_text, system_text = _extract_texts(body)
 
         # 1. Honor pins/bypass: forward untouched.
         bypass = _truthy(request.headers.get(settings.bypass_header))
@@ -231,6 +254,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if bypass and requested_model:
             chosen = requested_model
             decision_desc = "bypass: pin honored, no routing"
+        elif settings.passthrough_utility and is_utility_call(system_text):
+            # 1b. Harness utility call (title-gen/summarize/compaction): force the
+            # cheapest model, skip scoring entirely. Not a task to reason about.
+            chosen = app.state.cheapest_model
+            via = "utility"
+            decision_desc = "utility: harness call forced to cheapest model"
+            body["model"] = chosen
         else:
             # 2. Route. Fail-open to default on any router error.
             router: Router = app.state.router
@@ -247,13 +277,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 decision_desc = f"router error, default: {exc}"
             body["model"] = chosen
 
-        # Per-turn decision record (prompt_hash, r, band, demands, winner).
+        # Per-turn decision record. Metadata only by default — the raw prompt is
+        # NOT persisted (it carries repo contents / PR bodies / paths). The hash
+        # is enough to correlate; set ROUTER_LOG_PROMPTS=true for local debug.
         decision_id = hashlib.sha256(
             f"{time.time()}|{request_text}".encode()
         ).hexdigest()[:16]
-        _log_decision({
+        entry = {
             "id": decision_id,
-            "prompt": request_text[:4000],
             "prompt_hash": hashlib.sha256(request_text.encode()).hexdigest()[:16],
             "requested": requested_model,
             "chosen": chosen,
@@ -261,7 +292,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "demands": demands,
             "reasoning": reasoning,
             "ts": time.time(),
-        })
+        }
+        if settings.log_prompts:
+            entry["prompt"] = request_text[:4000]
+        if settings.feedback_enabled:
+            # Keep the raw prompt in MEMORY only (never written unless log_prompts)
+            # so a /feedback correction by decision id can back-solve it.
+            _RECENT.appendleft({**entry, "prompt": request_text})
+        _log_decision(entry)
 
         log.info(
             "route: id=%s requested=%s chosen=%s via=%s r=%s band=%s stream=%s",
