@@ -179,3 +179,71 @@ def test_autodetect_single(tmp_path, monkeypatch):
 def test_registry_lists_both():
     assert "opencode" in adapters.available()
     assert "openai-env" in adapters.available()
+
+
+# --- state log + acknowledgement (A3) --------------------------------------
+def _opencode_env(tmp_path, monkeypatch):
+    cfg = tmp_path / "opencode.jsonc"
+    _write_opencode(cfg)
+    monkeypatch.setenv("OPENCODE_GLOBAL_CONFIG", str(cfg))
+    monkeypatch.setenv("MODEL_ROUTER_TOGGLE_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("MODEL_ROUTER_TOGGLE_LOG", str(tmp_path / "toggle-log.jsonl"))
+    monkeypatch.setattr(toggle, "_probe", lambda proxy: True)
+    # module-level path constants are read at import; patch them to the tmp files
+    monkeypatch.setattr(toggle, "SIDECAR", str(tmp_path / "state.json"))
+    monkeypatch.setattr(toggle, "STATE_LOG", str(tmp_path / "toggle-log.jsonl"))
+    return cfg
+
+
+def test_toggle_writes_state_log(tmp_path, monkeypatch):
+    _opencode_env(tmp_path, monkeypatch)
+    toggle.main(["--harness", "opencode", "on"])
+    toggle.main(["--harness", "opencode", "off"])
+    log = (tmp_path / "toggle-log.jsonl").read_text().strip().splitlines()
+    recs = [json.loads(x) for x in log]
+    assert recs[0]["state"] == "ROUTER ACTIVE" and recs[0]["on"] is True
+    assert recs[-1]["state"] == "ROUTER BYPASSED" and recs[-1]["on"] is False
+    assert all(r["harness"] == "opencode" for r in recs)
+
+
+def test_status_reports_last_state(tmp_path, monkeypatch, capsys):
+    _opencode_env(tmp_path, monkeypatch)
+    toggle.main(["--harness", "opencode", "on"])
+    capsys.readouterr()
+    toggle.main(["--harness", "opencode", "status"])
+    out = capsys.readouterr().out
+    assert "ROUTER ACTIVE" in out
+    assert "last set:" in out
+
+
+def test_ack_on_emits_user_message(tmp_path, monkeypatch, capsys):
+    _opencode_env(tmp_path, monkeypatch)
+    toggle.main(["--harness", "opencode", "on"])
+    capsys.readouterr()
+    rc = toggle.main(["--harness", "opencode", "ack"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Model routing is ON" in out
+    assert "model-router-toggle off" in out
+    assert "x-model-router-bypass" in out  # points to the per-turn escape hatch
+
+
+def test_ack_suppressed_when_disabled(tmp_path, monkeypatch, capsys):
+    _opencode_env(tmp_path, monkeypatch)
+    toggle.main(["--harness", "opencode", "on"])
+    capsys.readouterr()
+    monkeypatch.setenv("MODEL_ROUTER_ACK", "off")
+    rc = toggle.main(["--harness", "opencode", "ack"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip() == ""  # log-only mode: no user-facing acknowledgement
+
+
+def test_ack_off_state_message(tmp_path, monkeypatch, capsys):
+    _opencode_env(tmp_path, monkeypatch)
+    # never turned on → router OFF
+    capsys.readouterr()
+    rc = toggle.main(["--harness", "opencode", "ack"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Model routing is OFF" in out
