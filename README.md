@@ -39,6 +39,12 @@ default** and is best reserved as an escalation after you've *measured* the scor
 misrouting. Turn it on with `ROUTER_JUDGE_ENABLED=true` when the per-turn cost is
 acceptable.
 
+> **Future engine option.** A small local **distilled/encoder** decision model
+> (e.g. [laya](https://github.com/NandhaKishorM/laya), Apache-2.0) was evaluated
+> as a third engine between "fast deterministic" and "slow LLM judge." It is
+> **deferred** (benchmark + footprint + accuracy considerations) — see
+> [`docs/decisions/0001-deterministic-scorer-defer-local-model.md`](docs/decisions/0001-deterministic-scorer-defer-local-model.md).
+
 **Why graded, not boolean:** a boolean `reasoning` demand made the top tier
 *unreachable* — on the USAi catalog every rank-4/5 model (Opus/GPT-5) has the
 same capability set as a rank-3 Sonnet, so "cheapest covering reasoning" always
@@ -302,6 +308,17 @@ curl -s -D- http://localhost:8080/v1/chat/completions \
 ```
 
 ## Deploy to cloud.gov
+
+> **⚠️ Currently parked: cloud.gov cannot reach USAi today.** `api.gsa.usai.gov`
+> is only reachable from inside the GSA network (behind Zscaler). A cloud.gov
+> deploy **starts**, but its outbound call to USAi fails — `/readyz` reports
+> `candidates:0` and `GET /models` returns no route (`000`). So the steps below
+> are **deploy-ready but not usable yet**; they are retained for the moment USAi
+> becomes reachable from cloud.gov (or an internal GSA-network host hosts a
+> shared service). **Until then, run the service where USAi is reachable** — the
+> `model-router-proxy` kit's default **in-sandbox** mode, or your GSA-network
+> host (see "Run locally"). This matches the kit's ADR
+> `0001-in-sandbox-mode-default-cloudgov-parked.md`.
 
 The service is a config-free app (12-factor): the Python buildpack runs it, it
 binds `$PORT` automatically, and **every** host/model/key is an env var. The
