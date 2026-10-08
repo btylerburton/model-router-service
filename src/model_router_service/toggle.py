@@ -43,6 +43,38 @@ STATE_LOG = os.environ.get(
     "MODEL_ROUTER_TOGGLE_LOG",
     os.path.expanduser("~/.model-router/toggle-log.jsonl"),
 )
+# A persistent DESIRED-STATE preference ("on"/"off"), per harness. This is what
+# makes `off` survive a restart: the kit's startup script reads it and SKIPS the
+# auto-flip when the user chose off. Without it, every reboot re-flipped routing
+# back on and `off` was effectively unreachable. `on`/`off` write this; the
+# startup script and `status` read it. Default (file absent / no entry) = on.
+PREF_FILE = os.environ.get(
+    "MODEL_ROUTER_PREF",
+    os.path.expanduser("~/.model-router/pref.json"),
+)
+
+
+def _read_pref() -> dict:
+    if os.path.isfile(PREF_FILE):
+        try:
+            return json.loads(open(PREF_FILE, encoding="utf-8").read())
+        except Exception:
+            return {}
+    return {}
+
+
+def _write_pref(harness: str, desired: str) -> None:
+    """Persist the user's desired routing state for a harness. Best-effort."""
+    try:
+        d = _read_pref()
+        d[harness] = {"desired": desired, "ts": time.time()}
+        os.makedirs(os.path.dirname(PREF_FILE), exist_ok=True)
+        tmp = PREF_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, PREF_FILE)
+    except Exception:
+        pass
 
 
 # --- shared state (original base URLs, keyed per harness) ------------------
@@ -179,6 +211,7 @@ def cmd_on(args) -> int:
         return 1
 
     print(f"{ad.name}: router ON -> {target}")
+    _write_pref(ad.name, "on")  # clears any prior opt-out; future boots route
     _record_state(ad.name, on=True, target=target)
     _after_write(ad, proxy, on=True, target=target)
     return 0
@@ -214,8 +247,14 @@ def cmd_off(args) -> int:
 
     restored = original or "(harness default)"
     print(f"{ad.name}: router OFF -> {restored}")
+    _write_pref(ad.name, "off")  # PERSISTS: the kit's startup won't re-flip on
     _record_state(ad.name, on=False, target=original)
     _after_write(ad, proxy, on=False, target=original)
+    print(
+        f"{ad.name}: routing will STAY off across restarts until "
+        "`model-router-toggle on`.",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -239,6 +278,8 @@ def cmd_status(args) -> int:
         print(f"    target:  {ad.describe_target()}")
         print(f"    baseURL: {base}")
         print(f"    router:  {'ON' if on else 'OFF'}  ({'ROUTER ACTIVE' if on else 'ROUTER BYPASSED'})")
+        desired = (_read_pref().get(n) or {}).get("desired", "on")
+        print(f"    pref:    {desired}  (what the kit applies at next boot; default on)")
         # The last recorded toggle action (audit trail), if any.
         last = _last_state(n)
         if last:
@@ -292,6 +333,19 @@ def cmd_ack(args) -> int:
     return 0
 
 
+def cmd_pref(args) -> int:
+    """Print the persisted desired routing state for a harness: `on` or `off`.
+    Default (no preference recorded) is `on`. The kit's startup script calls
+    this to decide whether to auto-flip routing on at boot — so a user's `off`
+    survives restarts instead of being clobbered every boot."""
+    names = [args.harness] if args.harness else (adapters.autodetect() or ["opencode"])
+    pref = _read_pref()
+    name = names[0]
+    desired = (pref.get(name) or {}).get("desired", "on")
+    print(desired)
+    return 0
+
+
 def _after_write(ad, proxy: str, *, on: bool, target: str | None) -> None:
     # option C for the env adapter: also print an export line for immediate use.
     exporter = getattr(ad, "export_line", None)
@@ -333,6 +387,8 @@ def main(argv=None) -> int:
     s_st.set_defaults(func=cmd_status)
     s_ack = _common(sub.add_parser("ack", help="emit a session-start routing acknowledgement for the agent to surface (A3; silenced by MODEL_ROUTER_ACK=off)"))
     s_ack.set_defaults(func=cmd_ack)
+    s_pref = _common(sub.add_parser("pref", help="print the persisted desired state (on|off; default on) — used by the kit startup to honor a sticky off"))
+    s_pref.set_defaults(func=cmd_pref)
 
     args = p.parse_args(argv)
     # Merge pre/post-subcommand flags; post-subcommand value wins when given.

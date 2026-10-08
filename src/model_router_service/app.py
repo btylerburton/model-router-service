@@ -8,7 +8,7 @@ Every /v1/chat/completions request is:
      the request's `model` field to that choice, and forward to the real upstream
      gateway. Streaming (SSE) and non-streaming are both proxied faithfully.
   3. The chosen model + rationale is returned in an audit response header and
-     logged, so routing is always observable.
+     logged, so routing is always o:echo getcompletion(''bservable.
 
 FAIL-OPEN: a routing error never fails the turn — the request forwards to the
 configured default model. Only an UPSTREAM error (the real gateway) surfaces to
